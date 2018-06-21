@@ -1,13 +1,11 @@
 import keras
-import numpy as np
-from keras.datasets import cifar10
-from keras.models import Model
-from keras.layers import Dense, Dropout, Flatten
-from keras.layers import Conv2D, MaxPooling2D, Input
 from keras import optimizers
 from keras.callbacks import LearningRateScheduler, TensorBoard
-from keras.layers.normalization import BatchNormalization
+from keras.layers import Input
 from keras import backend as K
+
+import numpy as np
+from keras.datasets import cifar10
 
 def scheduler(epoch):
     learning_rate_init = 0.003
@@ -37,38 +35,71 @@ class LossWeightsModifier(keras.callbacks.Callback):
             K.set_value(self.gamma, 1)
 
 
-class Trainer:
-    def __init__(self, model, params):
-        #--- file paths ---
-        self.log_path = params.log_path
-        self.model_path = params.model_path
+class DataLoader:
+    def train_data(self):
+        raise NotImplementedError(
+            "train_data method is not implemented"
+        )
+
+        input_data = None
+        target_data = None
+        return input_data, target_data
+
+    def validations_data(self):
+        raise NotImplementedError(
+            "validation_data method is not implemented"
+        )
+        input_data = None
+        target_data = None
+        return input_data, target_data
+
+    def test_data(self):
+        raise NotImplementedError(
+            "test_data method is not implemented"
+        )
+
+        input_data = None
+        target_data = None
+        return input_data, target_data
+
+class CIFAR10(DataLoader):
+    def __init__(self, params):
+        self.num_classes = 10
 
         #--- coarse 1 classes ---
-        self.num_c_1      = 2  # coarse 1 classes
-        self.num_c_2      = 7  # coarse 2 classes
-        self.num_classes  = 10  # fine classes
+        self.num_c_1      = params.num_c_1  # coarse 1 classes
+        self.num_c_2      = params.num_c_2  # coarse 2 classes
+        self.num_classes  = params.num_classes  # fine classes
 
-        self.batch_size   = 128
-        # self.epochs       = 60
-        self.epochs       = 1
+    def train_data(self):
+        x_train = None
+        t_c1_train = None
+        t_c2_train = None
+        t_train = None
 
-    def train(self):
-        #-------- dimensions ---------
-        img_rows, img_cols = 32, 32
-        if K.image_data_format() == 'channels_first':
-            input_shape = (3, img_rows, img_cols)
-        else:
-            input_shape = (img_rows, img_cols, 3)
-        #-----------------------------
+        input_data = x_train
+        target_data = [t_c1_train, t_c2_train, t_train]
+        return input_data, target_data
 
-        train_size = 50000
+    def validation_data(self):
+        x_test = None
+        t_c1_test = None
+        t_c2_test = None
+        t_test = None
 
+        input_data = x_test
+        target_data = [t_c1_test, t_c2_test, t_test]
+        return input_data, target_data
+
+    def tmp(self):
         #-------------------- data loading ----------------------
         (x_train, y_train), (x_test, y_test) = cifar10.load_data()
         y_train = keras.utils.to_categorical(y_train, self.num_classes)
         y_test = keras.utils.to_categorical(y_test, self.num_classes)
+        self.y_test = y_test
         x_train = x_train.astype('float32')
         x_test = x_test.astype('float32')
+        self.x_test = x_test
 
         #---------------- data preprocessiong -------------------
         x_train = (x_train-np.mean(x_train)) / np.std(x_train)
@@ -76,8 +107,7 @@ class Trainer:
 
         #---------------------- make coarse 2 labels --------------------------
         parent_f = {
-            2:3, 3:5, 5:5,
-            1:2, 7:6, 4:6,
+            2:3, 3:5, 5:5, 1:2, 7:6, 4:6,
             0:0, 6:4, 8:1, 9:2
         }
         y_c2_train = np.zeros((y_train.shape[0], self.num_c_2)).astype("float32")
@@ -86,6 +116,7 @@ class Trainer:
             y_c2_train[i][parent_f[np.argmax(y_train[i])]] = 1.0
         for i in range(y_c2_test.shape[0]):
             y_c2_test[i][parent_f[np.argmax(y_test[i])]] = 1.0
+        self.y_c2_test = y_c2_test
 
         #---------------------- make coarse 1 labels --------------------------
         parent_c2 = {
@@ -98,7 +129,30 @@ class Trainer:
             y_c1_train[i][parent_c2[np.argmax(y_c2_train[i])]] = 1.0
         for i in range(y_c1_test.shape[0]):
             y_c1_test[i][parent_c2[np.argmax(y_c2_test[i])]] = 1.0
+        self.y_c1_test = y_c1_test
 
+class Trainer:
+    def __init__(self, model, params):
+        #--- file paths ---
+        self.log_path = params.log_path
+        self.model_path = params.model_path
+
+
+        self.batch_size   = params.batch_size
+        self.epochs       = params.epochs
+
+        self.model = model
+
+    def train(self, dataloader):
+        #-------- dimensions ---------
+        img_rows, img_cols = 32, 32
+        if K.image_data_format() == 'channels_first':
+            input_shape = (3, img_rows, img_cols)
+        else:
+            input_shape = (img_rows, img_cols, 3)
+        #-----------------------------
+
+        train_size = 50000
 
         #----------------------- model definition ---------------------------
         alpha = K.variable(value=0.98, dtype="float32", name="alpha") # A1 in paper
@@ -107,66 +161,8 @@ class Trainer:
 
         img_input = Input(shape=input_shape, name='input')
 
-        #--- block 1 ---
-        x = Conv2D(64, (3, 3), activation='relu', padding='same', name='block1_conv1')(img_input)
-        x = BatchNormalization()(x)
-        x = Conv2D(64, (3, 3), activation='relu', padding='same', name='block1_conv2')(x)
-        x = BatchNormalization()(x)
-        x = MaxPooling2D((2, 2), strides=(2, 2), name='block1_pool')(x)
-
-        #--- block 2 ---
-        x = Conv2D(128, (3, 3), activation='relu', padding='same', name='block2_conv1')(x)
-        x = BatchNormalization()(x)
-        x = Conv2D(128, (3, 3), activation='relu', padding='same', name='block2_conv2')(x)
-        x = BatchNormalization()(x)
-        x = MaxPooling2D((2, 2), strides=(2, 2), name='block2_pool')(x)
-
-        #--- coarse 1 branch ---
-        c_1_bch = Flatten(name='c1_flatten')(x)
-        c_1_bch = Dense(256, activation='relu', name='c1_fc_cifar10_1')(c_1_bch)
-        c_1_bch = BatchNormalization()(c_1_bch)
-        c_1_bch = Dropout(0.5)(c_1_bch)
-        c_1_bch = Dense(256, activation='relu', name='c1_fc2')(c_1_bch)
-        c_1_bch = BatchNormalization()(c_1_bch)
-        c_1_bch = Dropout(0.5)(c_1_bch)
-        c_1_pred = Dense(self.num_c_1, activation='softmax', name='c1_predictions_cifar10')(c_1_bch)
-
-        #--- block 3 ---
-        x = Conv2D(256, (3, 3), activation='relu', padding='same', name='block3_conv1')(x)
-        x = BatchNormalization()(x)
-        x = Conv2D(256, (3, 3), activation='relu', padding='same', name='block3_conv2')(x)
-        x = BatchNormalization()(x)
-        x = MaxPooling2D((2, 2), strides=(2, 2), name='block3_pool')(x)
-
-        #--- coarse 2 branch ---
-        c_2_bch = Flatten(name='c2_flatten')(x)
-        c_2_bch = Dense(512, activation='relu', name='c2_fc_cifar10_1')(c_2_bch)
-        c_2_bch = BatchNormalization()(c_2_bch)
-        c_2_bch = Dropout(0.5)(c_2_bch)
-        c_2_bch = Dense(512, activation='relu', name='c2_fc2')(c_2_bch)
-        c_2_bch = BatchNormalization()(c_2_bch)
-        c_2_bch = Dropout(0.5)(c_2_bch)
-        c_2_pred = Dense(self.num_c_2, activation='softmax', name='c2_predictions_cifar10')(c_2_bch)
-
-        #--- block 4 ---
-        x = Conv2D(512, (3, 3), activation='relu', padding='same', name='block4_conv1')(x)
-        x = BatchNormalization()(x)
-        x = Conv2D(512, (3, 3), activation='relu', padding='same', name='block4_conv2')(x)
-        x = BatchNormalization()(x)
-        x = MaxPooling2D((2, 2), strides=(2, 2), name='block4_pool')(x)
-
-        #--- fine block ---
-        x = Flatten(name='flatten')(x)
-        x = Dense(1024, activation='relu', name='fc_cifar10_1')(x)
-        x = BatchNormalization()(x)
-        x = Dropout(0.5)(x)
-        x = Dense(1024, activation='relu', name='fc2')(x)
-        x = BatchNormalization()(x)
-        x = Dropout(0.5)(x)
-        fine_pred = Dense(self.num_classes, activation='softmax', name='predictions_cifar10')(x)
-
-        model = Model(input=img_input, output=[c_1_pred, c_2_pred, fine_pred], name='medium_dynamic')
-
+        from b_cnn.models.bcnn_model import BCNN_Model
+        model = self.model(img_input)
         #----------------------- compile and fit ---------------------------
         sgd = optimizers.SGD(lr=0.003, momentum=0.9, nesterov=True)
         model.compile(loss='categorical_crossentropy',
@@ -180,15 +176,14 @@ class Trainer:
         change_lw = LossWeightsModifier(alpha, beta, gamma)
         cbks = [change_lr, tb_cb, change_lw]
 
-        model.fit(x_train, [y_c1_train, y_c2_train, y_train],
+        x_train, y_train = dataloader.train_data()
+        x_val, y_val = dataloader.validation_data()
+        model.fit(x_train, y_train,
                   batch_size=self.batch_size,
                   epochs=self.epochs,
                   verbose=1,
                   callbacks=cbks,
-                  validation_data=(
-                      x_test,
-                      [y_c1_test, y_c2_test, y_test]
-                  ))
+                  validation_data=(x_val, y_val))
 
         #---------------------------------------------------------------------------------
         # The following compile() is just a behavior to make sure this model can be saved.
@@ -198,8 +193,13 @@ class Trainer:
                       # optimizer=keras.optimizers.Adadelta(),
                       optimizer=sgd,
                       metrics=['accuracy'])
-
-        score = model.evaluate(x_test, [y_c1_test, y_c2_test, y_test], verbose=0)
         model.save(str(self.model_path))
+        return model
+
+    def estimate(self):
+        from keras.models import load_model
+        model = load_model(self.model_path)
+
+        score = model.evaluate(self.x_test, [self.y_c1_test, self.y_c2_test, self.y_test], verbose=0)
         print('score is: ', score)
 
