@@ -4,8 +4,6 @@ from keras.callbacks import LearningRateScheduler, TensorBoard
 from keras.layers import Input
 from keras import backend as K
 
-import numpy as np
-from keras.datasets import cifar10
 
 def scheduler(epoch):
     learning_rate_init = 0.003
@@ -35,115 +33,26 @@ class LossWeightsModifier(keras.callbacks.Callback):
             K.set_value(self.gamma, 1)
 
 
-class DataLoader:
-    def train_data(self):
-        raise NotImplementedError(
-            "train_data method is not implemented"
-        )
-
-        input_data = None
-        target_data = None
-        return input_data, target_data
-
-    def validations_data(self):
-        raise NotImplementedError(
-            "validation_data method is not implemented"
-        )
-        input_data = None
-        target_data = None
-        return input_data, target_data
-
-    def test_data(self):
-        raise NotImplementedError(
-            "test_data method is not implemented"
-        )
-
-        input_data = None
-        target_data = None
-        return input_data, target_data
-
-class CIFAR10(DataLoader):
-    def __init__(self, params):
-        self.num_classes = 10
-
-        #--- coarse 1 classes ---
-        self.num_c_1      = params.num_c_1  # coarse 1 classes
-        self.num_c_2      = params.num_c_2  # coarse 2 classes
-        self.num_classes  = params.num_classes  # fine classes
-
-    def train_data(self):
-        x_train = None
-        t_c1_train = None
-        t_c2_train = None
-        t_train = None
-
-        input_data = x_train
-        target_data = [t_c1_train, t_c2_train, t_train]
-        return input_data, target_data
-
-    def validation_data(self):
-        x_test = None
-        t_c1_test = None
-        t_c2_test = None
-        t_test = None
-
-        input_data = x_test
-        target_data = [t_c1_test, t_c2_test, t_test]
-        return input_data, target_data
-
-    def tmp(self):
-        #-------------------- data loading ----------------------
-        (x_train, y_train), (x_test, y_test) = cifar10.load_data()
-        y_train = keras.utils.to_categorical(y_train, self.num_classes)
-        y_test = keras.utils.to_categorical(y_test, self.num_classes)
-        self.y_test = y_test
-        x_train = x_train.astype('float32')
-        x_test = x_test.astype('float32')
-        self.x_test = x_test
-
-        #---------------- data preprocessiong -------------------
-        x_train = (x_train-np.mean(x_train)) / np.std(x_train)
-        x_test = (x_test-np.mean(x_test)) / np.std(x_test)
-
-        #---------------------- make coarse 2 labels --------------------------
-        parent_f = {
-            2:3, 3:5, 5:5, 1:2, 7:6, 4:6,
-            0:0, 6:4, 8:1, 9:2
-        }
-        y_c2_train = np.zeros((y_train.shape[0], self.num_c_2)).astype("float32")
-        y_c2_test = np.zeros((y_test.shape[0], self.num_c_2)).astype("float32")
-        for i in range(y_c2_train.shape[0]):
-            y_c2_train[i][parent_f[np.argmax(y_train[i])]] = 1.0
-        for i in range(y_c2_test.shape[0]):
-            y_c2_test[i][parent_f[np.argmax(y_test[i])]] = 1.0
-        self.y_c2_test = y_c2_test
-
-        #---------------------- make coarse 1 labels --------------------------
-        parent_c2 = {
-            0:0, 1:0, 2:0,
-            3:1, 4:1, 5:1, 6:1
-        }
-        y_c1_train = np.zeros((y_c2_train.shape[0], self.num_c_1)).astype("float32")
-        y_c1_test = np.zeros((y_c2_test.shape[0], self.num_c_1)).astype("float32")
-        for i in range(y_c1_train.shape[0]):
-            y_c1_train[i][parent_c2[np.argmax(y_c2_train[i])]] = 1.0
-        for i in range(y_c1_test.shape[0]):
-            y_c1_test[i][parent_c2[np.argmax(y_c2_test[i])]] = 1.0
-        self.y_c1_test = y_c1_test
-
+from b_cnn.controllers.dataloader import DataLoader
 class Trainer:
-    def __init__(self, model, params):
+    def __init__(self, model, dataloader, params):
+        self.dataloader = dataloader
+        if not isinstance(dataloader, DataLoader):
+            raise AttributeError(
+                "dataloader must be instance of DataLoader"
+            )
+
+
         #--- file paths ---
         self.log_path = params.log_path
         self.model_path = params.model_path
-
 
         self.batch_size   = params.batch_size
         self.epochs       = params.epochs
 
         self.model = model
 
-    def train(self, dataloader):
+    def train(self):
         #-------- dimensions ---------
         img_rows, img_cols = 32, 32
         if K.image_data_format() == 'channels_first':
@@ -161,7 +70,6 @@ class Trainer:
 
         img_input = Input(shape=input_shape, name='input')
 
-        from b_cnn.models.bcnn_model import BCNN_Model
         model = self.model(img_input)
         #----------------------- compile and fit ---------------------------
         sgd = optimizers.SGD(lr=0.003, momentum=0.9, nesterov=True)
@@ -176,8 +84,8 @@ class Trainer:
         change_lw = LossWeightsModifier(alpha, beta, gamma)
         cbks = [change_lr, tb_cb, change_lw]
 
-        x_train, y_train = dataloader.train_data()
-        x_val, y_val = dataloader.validation_data()
+        x_train, y_train = self.dataloader.train_data()
+        x_val, y_val = self.dataloader.validation_data()
         model.fit(x_train, y_train,
                   batch_size=self.batch_size,
                   epochs=self.epochs,
@@ -194,12 +102,13 @@ class Trainer:
                       optimizer=sgd,
                       metrics=['accuracy'])
         model.save(str(self.model_path))
-        return model
+        # return model
 
     def estimate(self):
         from keras.models import load_model
         model = load_model(self.model_path)
 
-        score = model.evaluate(self.x_test, [self.y_c1_test, self.y_c2_test, self.y_test], verbose=0)
+        x_test, y_test = self.dataloader.test_data()
+        score = model.evaluate(x_test, y_test, verbose=0)
         print('score is: ', score)
 
